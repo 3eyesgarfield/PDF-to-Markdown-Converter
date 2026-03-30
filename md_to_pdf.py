@@ -1,10 +1,15 @@
 """
 Convert Markdown (with images) to clean PDF for TTS/朗读.
-- No page numbers
-- Clean up OCR spacing artifacts
-- Chinese font support
 
-Usage: python md_to_pdf.py <input.md> [output.pdf]
+Usage:
+  python md_to_pdf.py <input.md> [output.pdf] [options]
+
+Options:
+  --dark              Dark mode (dark background + light text)
+  --invert-images     Invert image colors (for dark mode readability)
+  --no-clean-spaces   Keep original OCR spaces between CJK characters
+  --no-nbsp           Allow line breaks inside parenthesized terms
+  --page-numbers      Show page numbers in footer
 """
 import sys
 import os
@@ -13,7 +18,17 @@ from fpdf import FPDF
 
 args = [a for a in sys.argv[1:] if not a.startswith("--")]
 flags = [a for a in sys.argv[1:] if a.startswith("--")]
+
 DARK_MODE = "--dark" in flags
+INVERT_IMAGES = "--invert-images" in flags
+CLEAN_SPACES = "--no-clean-spaces" not in flags    # default: ON
+USE_NBSP = "--no-nbsp" not in flags                # default: ON
+PAGE_NUMBERS = "--page-numbers" in flags           # default: OFF
+
+if "--help" in flags or "-h" in sys.argv:
+    print(__doc__)
+    sys.exit(0)
+
 MD_PATH = args[0] if len(args) > 0 else r"C:\Users\H610\Desktop\marker_final_full\output.md"
 PDF_PATH = args[1] if len(args) > 1 else None
 
@@ -26,23 +41,22 @@ BASE_DIR = os.path.dirname(os.path.abspath(MD_PATH))
 
 def clean_text(text):
     """Clean up OCR artifacts for TTS readability."""
-    # Remove spaces between CJK characters (OCR artifact)
-    text = re.sub(r'([\u4e00-\u9fff\u3000-\u303f\uff00-\uffef])\s+([\u4e00-\u9fff\u3000-\u303f\uff00-\uffef])', r'\1\2', text)
-    # Run twice to catch overlapping matches like "质 量 反 馈"
-    text = re.sub(r'([\u4e00-\u9fff\u3000-\u303f\uff00-\uffef])\s+([\u4e00-\u9fff\u3000-\u303f\uff00-\uffef])', r'\1\2', text)
-    text = re.sub(r'([\u4e00-\u9fff\u3000-\u303f\uff00-\uffef])\s+([\u4e00-\u9fff\u3000-\u303f\uff00-\uffef])', r'\1\2', text)
-    # Remove spaces between CJK and punctuation
-    text = re.sub(r'([\u4e00-\u9fff])\s+([，。、；：！？）》」』】])', r'\1\2', text)
-    text = re.sub(r'([（《「『【])\s+([\u4e00-\u9fff])', r'\1\2', text)
+    if CLEAN_SPACES:
+        # Remove spaces between CJK characters (OCR artifact)
+        for _ in range(3):
+            text = re.sub(r'([\u4e00-\u9fff\u3000-\u303f\uff00-\uffef])\s+([\u4e00-\u9fff\u3000-\u303f\uff00-\uffef])', r'\1\2', text)
+        # Remove spaces between CJK and punctuation
+        text = re.sub(r'([\u4e00-\u9fff])\s+([，。、；：！？）》」』】])', r'\1\2', text)
+        text = re.sub(r'([（《「『【])\s+([\u4e00-\u9fff])', r'\1\2', text)
     # Normalize multiple spaces to single
     text = re.sub(r'  +', ' ', text)
     # Replace spaces inside parentheses with non-breaking spaces
-    # so English terms like "Local Area Network, LAN" don't break across lines
-    NBSP = '\u00a0'
-    def nbspify_parens(m):
-        return m.group(0).replace(' ', NBSP)
-    text = re.sub(r'\([^)]{1,80}\)', nbspify_parens, text)
-    text = re.sub(r'（[^）]{1,80}）', nbspify_parens, text)
+    if USE_NBSP:
+        NBSP = '\u00a0'
+        def nbspify_parens(m):
+            return m.group(0).replace(' ', NBSP)
+        text = re.sub(r'\([^)]{1,80}\)', nbspify_parens, text)
+        text = re.sub(r'（[^）]{1,80}）', nbspify_parens, text)
     return text.strip()
 
 
@@ -53,7 +67,6 @@ class MarkdownPDF(FPDF):
         self.add_font("msyh", "", r"C:\Windows\Fonts\msyh.ttc")
         self.add_font("msyh", "B", r"C:\Windows\Fonts\msyhbd.ttc")
         self.set_auto_page_break(auto=True, margin=15)
-        # Colors
         if dark_mode:
             self.bg_color = (30, 30, 30)
             self.head_color = (230, 230, 230)
@@ -67,6 +80,13 @@ class MarkdownPDF(FPDF):
         if self.dark_mode:
             self.set_fill_color(*self.bg_color)
             self.rect(0, 0, self.w, self.h, "F")
+
+    def footer(self):
+        if PAGE_NUMBERS:
+            self.set_y(-15)
+            self.set_font("msyh", "", 8)
+            self.set_text_color(150, 150, 150)
+            self.cell(0, 10, f"{self.page_no()}", align="C")
 
     def write_heading(self, level, text):
         sizes = {1: 18, 2: 15, 3: 13, 4: 11}
@@ -95,9 +115,28 @@ class MarkdownPDF(FPDF):
         if not os.path.exists(full_path):
             return
         try:
-            from PIL import Image as PILImage
-            with PILImage.open(full_path) as im:
-                img_w, img_h = im.size
+            from PIL import Image as PILImage, ImageOps
+            import io
+
+            im = PILImage.open(full_path)
+            img_w, img_h = im.size
+
+            if INVERT_IMAGES:
+                if im.mode == "RGBA":
+                    r, g, b, a = im.split()
+                    rgb = PILImage.merge("RGB", (r, g, b))
+                    rgb = ImageOps.invert(rgb)
+                    im = PILImage.merge("RGBA", (*rgb.split(), a))
+                else:
+                    im = im.convert("RGB")
+                    im = ImageOps.invert(im)
+                buf = io.BytesIO()
+                im.save(buf, format="PNG")
+                buf.seek(0)
+                img_src = buf
+            else:
+                img_src = full_path
+                im.close()
 
             max_w = self.w - self.l_margin - self.r_margin
             max_h = self.h - self.t_margin - 20
@@ -118,8 +157,12 @@ class MarkdownPDF(FPDF):
                 self.add_page()
 
             x = self.l_margin + (max_w - display_w) / 2
-            self.image(full_path, x=x, y=self.get_y(), w=display_w, h=display_h)
+            self.image(img_src, x=x, y=self.get_y(), w=display_w, h=display_h)
             self.set_y(self.get_y() + display_h + 3)
+
+            if INVERT_IMAGES:
+                im.close()
+                buf.close()
         except Exception:
             pass
 
@@ -181,6 +224,13 @@ with open(MD_PATH, "r", encoding="utf-8") as f:
     md_text = f.read()
 
 print(f"Converting {MD_PATH} -> {PDF_PATH}")
+opts = []
+if DARK_MODE: opts.append("dark")
+if INVERT_IMAGES: opts.append("invert-images")
+if not CLEAN_SPACES: opts.append("no-clean-spaces")
+if not USE_NBSP: opts.append("no-nbsp")
+if PAGE_NUMBERS: opts.append("page-numbers")
+print(f"  Options: {', '.join(opts) if opts else 'defaults'}")
 
 pdf = MarkdownPDF(dark_mode=DARK_MODE)
 pdf.add_page()
